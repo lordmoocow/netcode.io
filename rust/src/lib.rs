@@ -139,16 +139,10 @@
 #![feature(nll, stmt_expr_attributes)]
 #![warn(rust_2018_idioms)]
 
-/*
-
-
-#[cfg(test)]
-
-*/
-
 #[cfg(test)]
 #[macro_use]
-#[macro_use]
+extern crate lazy_static;
+
 #[cfg(test)]
 pub mod capi;
 

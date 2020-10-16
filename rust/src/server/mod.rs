@@ -1009,13 +1009,9 @@ mod test {
 
     #[allow(dead_code)]
     fn enable_logging() {
-        use env_logger::LogBuilder;
-        use log::LogLevelFilter;
+        use env_logger::Builder;
 
-        LogBuilder::new()
-            .filter(None, LogLevelFilter::Trace)
-            .init()
-            .unwrap();
+        Builder::new().filter(None, LevelFilter::Trace).init();
 
         use crate::capi::*;
         unsafe {
