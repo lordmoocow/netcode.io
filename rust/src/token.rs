@@ -1,6 +1,7 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io;
 use std::io::Write;
+use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time;
 
@@ -688,18 +689,20 @@ fn decode() {
 }
 
 #[cfg(test)]
+use crate::capi;
+
+#[cfg(test)]
 fn capi_connect_token<I>(
     hosts: I,
     private_key: &[u8; NETCODE_KEY_BYTES],
     expire: i32,
     client_id: u64,
     protocol: u64,
-    sequence: u64,
+    user_data: &[u8; NETCODE_USER_DATA_BYTES],
 ) -> Result<[u8; NETCODE_CONNECT_TOKEN_BYTES], ()>
 where
     I: Iterator<Item = String>,
 {
-    use crate::capi;
     use std::ffi::CString;
 
     let mut host_list_ptr = [::std::ptr::null_mut(); NETCODE_MAX_SERVERS_PER_CONNECT];
@@ -722,8 +725,8 @@ where
             expire,
             client_id,
             protocol,
-            sequence,
-            ::std::mem::transmute(private_key.as_ptr()),
+            user_data.as_ptr() as *const u8,
+            private_key.as_ptr() as *mut u8,
             token.as_mut_ptr(),
         ) {
             0 => Err(()),
@@ -732,15 +735,29 @@ where
     };
 
     //Make sure to free our memory that we passed to netcode
-    for host in &mut host_list_ptr[..] {
-        if *host != ::std::ptr::null_mut() {
+    for host in &host_list_ptr[..host_count as usize] {
+        if !host.is_null() {
             unsafe {
-                CString::from_raw(*host);
+                let _ = CString::from_raw(*host);
             }
         }
-        *host = ::std::ptr::null_mut();
     }
+
     result
+}
+
+#[cfg(test)]
+fn capi_read(token: &mut [u8]) -> capi::netcode_connect_token_t {
+    let mut output = MaybeUninit::<capi::netcode_connect_token_t>::uninit();
+    let c_token_read_result = unsafe {
+        capi::netcode_read_connect_token(
+            token.as_mut_ptr(),
+            token.len() as i32,
+            output.as_mut_ptr(),
+        )
+    };
+    assert_eq!(c_token_read_result, 1); // returns 1 on successful read
+    unsafe { output.assume_init() }
 }
 
 #[test]
@@ -751,26 +768,27 @@ fn interop_read() {
     let mut user_data = [0; NETCODE_USER_DATA_BYTES];
     crypto::random_bytes(&mut user_data);
 
+    let hosts = ["127.0.0.1:8080".to_string()];
     let expire = 30;
-    let sequence = 1;
-    let protocol = 0x112233445566;
-    let client_id = 0x665544332211;
+    let protocol = 0x1122_3344_5566;
+    let client_id = 0x6655_4433_2211;
 
-    let result = capi_connect_token(
-        ["127.0.0.1:8080".to_string()].iter().cloned(),
+    let mut result = capi_connect_token(
+        hosts.iter().cloned(),
         &private_key,
         expire,
         client_id,
         protocol,
-        sequence,
+        &user_data,
     )
     .unwrap();
 
-    let conv = ConnectToken::read(&mut io::Cursor::new(&result[..])).unwrap();
-
-    assert_eq!(conv.sequence, sequence);
-    assert_eq!(conv.protocol, protocol);
-    assert_eq!(conv.expire_utc, conv.create_utc + expire as u64);
+    let c_token = capi_read(&mut result);
+    let mut conv = ConnectToken::read(&mut io::Cursor::new(&result)).unwrap();
+    assert_eq!(conv.protocol, c_token.protocol_id);
+    assert_eq!(conv.expire_utc, c_token.expire_timestamp);
+    assert_eq!(conv.create_utc, c_token.create_timestamp);
+    assert_eq!(conv.private_data, c_token.private_data);
 }
 
 #[test]
@@ -805,22 +823,26 @@ fn interop_write() {
     let mut scratch = [0; NETCODE_CONNECT_TOKEN_BYTES];
     token.write(&mut io::Cursor::new(&mut scratch[..])).unwrap();
 
-    unsafe {
-        let mut output: capi::netcode_connect_token_t = ::std::mem::uninitialized();
-        assert_eq!(
-            capi::netcode_read_connect_token(
-                scratch.as_mut_ptr(),
-                scratch.len() as i32,
-                &mut output
-            ),
-            1
-        );
+    let mut output = MaybeUninit::<capi::netcode_connect_token_t>::uninit();
+    let c_token_read_result = unsafe {
+        capi::netcode_read_connect_token(
+            scratch.as_mut_ptr(),
+            scratch.len() as i32,
+            output.as_mut_ptr(),
+        )
+    };
+    assert_eq!(c_token_read_result, 1); // returns 1 on successful read
+    let output = unsafe { output.assume_init() };
 
-        assert_eq!(output.sequence, sequence);
-        assert_eq!(
-            output.expire_timestamp,
-            output.create_timestamp + expire as u64
-        );
-        assert_eq!(output.protocol_id, protocol);
-    }
+    //assert_eq!(output.nonce, token.sequence);
+    assert_eq!(output.create_timestamp, token.create_utc);
+    assert_eq!(output.expire_timestamp, token.expire_utc);
+    assert_eq!(
+        output.expire_timestamp,
+        output.create_timestamp + expire as u64
+    );
+    assert_eq!(output.protocol_id, protocol);
+    assert_eq!(output.server_to_client_key, token.server_to_client_key);
+    assert_eq!(output.client_to_server_key, token.client_to_server_key);
+    assert_eq!(output.private_data, token.private_data);
 }
