@@ -198,8 +198,8 @@ pub fn encode(
     if let Packet::ConnectionRequest(ref req) = *packet {
         let mut writer = io::Cursor::new(&mut out[..]);
 
-        //First byte is always id + sequence
-        writer.write_u8(encode_prefix(packet.get_type_id() as u8, 0))?;
+        //First byte is always 0
+        writer.write_u8(packet.get_type_id())?;
         req.write(&mut writer)?;
 
         // TODO: fix me
@@ -255,7 +255,7 @@ pub struct ConnectionRequestPacket {
     pub version: [u8; NETCODE_VERSION_LEN],
     pub protocol_id: u64,
     pub token_expire: u64,
-    pub sequence: u64,
+    pub nonce: [u8; NETCODE_CONNECT_TOKEN_NONCE_BYTES],
     pub private_data: [u8; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES],
 }
 
@@ -265,7 +265,7 @@ impl ConnectionRequestPacket {
             version: *NETCODE_VERSION_STRING,
             protocol_id: token.protocol,
             token_expire: token.expire_utc,
-            sequence: token.sequence,
+            nonce: token.nonce,
             private_data: token.private_data,
         }
     }
@@ -279,7 +279,9 @@ impl ConnectionRequestPacket {
 
         let protocol_id = source.read_u64::<LittleEndian>()?;
         let token_expire = source.read_u64::<LittleEndian>()?;
-        let sequence = source.read_u64::<LittleEndian>()?;
+
+        let mut nonce = [0; NETCODE_CONNECT_TOKEN_NONCE_BYTES];
+        source.read_exact(&mut nonce)?;
 
         let mut private_data = [0; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
         source.read_exact(&mut private_data[..])?;
@@ -288,7 +290,7 @@ impl ConnectionRequestPacket {
             version,
             protocol_id,
             token_expire,
-            sequence,
+            nonce,
             private_data,
         })
     }
@@ -300,7 +302,7 @@ impl ConnectionRequestPacket {
         out.write_all(&self.version)?;
         out.write_u64::<LittleEndian>(self.protocol_id)?;
         out.write_u64::<LittleEndian>(self.token_expire)?;
-        out.write_u64::<LittleEndian>(self.sequence)?;
+        out.write_all(&self.nonce)?;
         out.write_all(&self.private_data)?;
 
         Ok(())
@@ -643,7 +645,7 @@ fn test_conn_packet() {
     use std::str::FromStr;
 
     let protocol_id = 0xFFCC;
-    let sequence = 0xCCDD;
+    let sequence = crypto::generate_nonce();
     let pkey = crypto::generate_key();
 
     let token = token::ConnectToken::generate(
@@ -652,7 +654,6 @@ fn test_conn_packet() {
             .cloned(),
         &pkey,
         30, //Expire
-        sequence,
         protocol_id,
         0xFFEE, //Client Id
         None,
@@ -661,25 +662,21 @@ fn test_conn_packet() {
 
     let packet = Packet::ConnectionRequest(ConnectionRequestPacket {
         protocol_id,
-        sequence,
-        version: NETCODE_VERSION_STRING.clone(),
+        nonce: sequence,
+        version: *NETCODE_VERSION_STRING,
         token_expire: token.expire_utc,
         private_data: token.private_data,
     });
 
     test_encode_decode(packet, None, Some(pkey), |p| match p {
         Packet::ConnectionRequest(p) => {
-            for i in 0..p.version.len() {
-                assert_eq!(
-                    p.version[i], NETCODE_VERSION_STRING[i],
-                    "mismatch at index {}",
-                    i
-                );
+            for (i, v) in p.version.iter().enumerate() {
+                assert_eq!(v, &NETCODE_VERSION_STRING[i], "mismatch at index {}", i);
             }
 
             assert_eq!(p.protocol_id, protocol_id);
             assert_eq!(p.token_expire, token.expire_utc);
-            assert_eq!(p.sequence, sequence);
+            assert_eq!(p.nonce, sequence);
 
             for i in 0..p.private_data.len() {
                 assert_eq!(p.private_data[i], token.private_data[i]);

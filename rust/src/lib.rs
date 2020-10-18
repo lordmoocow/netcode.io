@@ -98,20 +98,15 @@
 //! const PROTOCOL_ID: u64 = 0xFFEE;
 //!
 //! # fn get_client_id() -> u64 { 0 }
-//! # fn get_next_sequence() -> u64 { 0 }
 //! let private_key = netcode::generate_key(); //Note: You probably want to
 //!                                            //store this some where safe.
 //! let client_id = get_client_id(); //Unique u64 client id.
-//! let sequence = get_next_sequence(); //sequence passed to generate() must
-//!                                     //be a monotically increasing u64
-//!                                     //to prevent replay attacks.
 //! let user_data = None;   //Any custom user data, can be up to 256 bytes.
 //!                         //Will be encrypted and returned to sever on connect.
 //!
 //! let token = ConnectToken::generate_with_string(["127.0.0.1:5000"].iter().cloned(),
 //!                                                &private_key,
 //!                                                EXPIRE_SECONDS,
-//!                                                sequence,
 //!                                                PROTOCOL_ID,
 //!                                                client_id,
 //!                                                user_data).unwrap();

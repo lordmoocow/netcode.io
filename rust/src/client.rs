@@ -484,7 +484,7 @@ mod test {
         pub fn new(in_token: Option<ConnectToken>) -> TestHarness<I, S> {
             let private_key = crypto::generate_key();
 
-            let addr = format!("127.0.0.1:0");
+            let addr = "127.0.0.1:0";
             let (server, mut client) = if let Some(ref token) = in_token {
                 let client = Client::<I, S>::new_with_state(token, I::new_state()).unwrap();
                 (None, client)
@@ -517,7 +517,6 @@ mod test {
                 [addr].iter().cloned(),
                 private_key,
                 30, //Expire
-                0,
                 PROTOCOL_ID,
                 CLIENT_ID, //Client Id
                 None,

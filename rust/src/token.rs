@@ -71,7 +71,7 @@ pub struct ConnectToken {
     /// Token expire time in ms from unix epoch.
     pub expire_utc: u64,
     /// Nonce sequence for decoding private data.
-    pub sequence: u64,
+    pub nonce: [u8; NETCODE_CONNECT_TOKEN_NONCE_BYTES],
     /// Private data encryped with server's private key(separate from client <-> server keys).
     pub private_data: [u8; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES],
     /// List of hosts this token supports connecting to.
@@ -90,7 +90,7 @@ impl Clone for ConnectToken {
             protocol: self.protocol,
             create_utc: self.create_utc,
             expire_utc: self.expire_utc,
-            sequence: self.sequence,
+            nonce: self.nonce,
             private_data: self.private_data,
             hosts: self.hosts.clone(),
             client_to_server_key: self.client_to_server_key,
@@ -117,14 +117,6 @@ pub struct PrivateData {
 #[derive(Clone, Debug)]
 pub struct HostList {
     hosts: [Option<SocketAddr>; NETCODE_MAX_SERVERS_PER_CONNECT],
-}
-
-fn generate_user_data() -> [u8; NETCODE_USER_DATA_BYTES] {
-    let mut user_data: [u8; NETCODE_USER_DATA_BYTES] = [0; NETCODE_USER_DATA_BYTES];
-
-    crypto::random_bytes(&mut user_data);
-
-    user_data
 }
 
 fn generate_additional_data(
@@ -160,8 +152,6 @@ impl ConnectToken {
     ///
     /// `expire_sec`: How long this token is valid for in seconds.
     ///
-    /// `sequence`: Sequence nonce to use, this should always be unique per server, per token. Use a continously incrementing counter should be sufficient for most cases.
-    ///
     /// `protocol`: Client specific protocol.
     ///
     /// `client_id`: Unique client identifier.
@@ -171,7 +161,6 @@ impl ConnectToken {
         hosts: H,
         private_key: &[u8; NETCODE_KEY_BYTES],
         expire_sec: usize,
-        sequence: u64,
         protocol: u64,
         client_id: u64,
         user_data: Option<&[u8; NETCODE_USER_DATA_BYTES]>,
@@ -195,7 +184,6 @@ impl ConnectToken {
             host_list,
             private_key,
             expire_sec,
-            sequence,
             protocol,
             client_id,
             user_data,
@@ -210,8 +198,6 @@ impl ConnectToken {
     ///
     /// `expire_sec`: How long this token is valid for in seconds.
     ///
-    /// `sequence`: Sequence nonce to use, this should always be unique per server, per token. Use a continously incrementing counter should be sufficient for most cases.
-    ///
     /// `protocol`: Client specific protocol.
     ///
     /// `client_id`: Unique client identifier.
@@ -221,7 +207,6 @@ impl ConnectToken {
         hosts: H,
         private_key: &[u8; NETCODE_KEY_BYTES],
         expire_sec: usize,
-        sequence: u64,
         protocol: u64,
         client_id: u64,
         user_data: Option<&[u8; NETCODE_USER_DATA_BYTES]>,
@@ -237,7 +222,6 @@ impl ConnectToken {
             hosts,
             private_key,
             expire_sec,
-            sequence,
             protocol,
             client_id,
             user_data,
@@ -248,7 +232,6 @@ impl ConnectToken {
         hosts: H,
         private_key: &[u8; NETCODE_KEY_BYTES],
         expire_sec: usize,
-        sequence: u64,
         protocol: u64,
         client_id: u64,
         user_data: Option<&[u8; NETCODE_USER_DATA_BYTES]>,
@@ -259,14 +242,14 @@ impl ConnectToken {
         let now = get_time_now();
         let expire = now + expire_sec as u64;
 
+        let nonce = crypto::generate_nonce();
         let decoded_data = PrivateData::new(client_id, hosts, user_data);
-
         let mut private_data = [0; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
-        decoded_data.encode(&mut private_data, protocol, expire, sequence, private_key)?;
+        decoded_data.encode(&mut private_data, protocol, expire, &nonce, private_key)?;
 
         Ok(Self {
             protocol,
-            sequence,
+            nonce,
             private_data,
             hosts: decoded_data.hosts.clone(),
             create_utc: now,
@@ -279,7 +262,6 @@ impl ConnectToken {
 
     /// Decodes the private data stored by this connection token.
     /// `private_key` - Server's private key used to generate this token.
-    /// `sequence` - Nonce sequence used to generate this token.
     pub fn decode(
         &mut self,
         private_key: &[u8; NETCODE_KEY_BYTES],
@@ -288,7 +270,7 @@ impl ConnectToken {
             &self.private_data,
             self.protocol,
             self.expire_utc,
-            self.sequence,
+            &self.nonce,
             private_key,
         )
     }
@@ -302,7 +284,7 @@ impl ConnectToken {
         out.write_u64::<LittleEndian>(self.protocol)?;
         out.write_u64::<LittleEndian>(self.create_utc)?;
         out.write_u64::<LittleEndian>(self.expire_utc)?;
-        out.write_u64::<LittleEndian>(self.sequence)?;
+        out.write_all(&self.nonce)?;
         out.write_all(&self.private_data)?;
         out.write_i32::<LittleEndian>(self.timeout_sec)?;
         self.hosts.write(out)?;
@@ -328,7 +310,9 @@ impl ConnectToken {
         let protocol = source.read_u64::<LittleEndian>()?;
         let create_utc = source.read_u64::<LittleEndian>()?;
         let expire_utc = source.read_u64::<LittleEndian>()?;
-        let sequence = source.read_u64::<LittleEndian>()?;
+
+        let mut nonce = [0; NETCODE_CONNECT_TOKEN_NONCE_BYTES];
+        source.read_exact(&mut nonce)?;
 
         let mut private_data = [0; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
         source.read_exact(&mut private_data)?;
@@ -348,7 +332,7 @@ impl ConnectToken {
             create_utc,
             expire_utc,
             protocol,
-            sequence,
+            nonce,
             private_data,
             client_to_server_key,
             server_to_client_key,
@@ -368,11 +352,11 @@ impl PrivateData {
     {
         let final_user_data = match user_data {
             Some(u) => {
-                let mut copy_ud: [u8; NETCODE_USER_DATA_BYTES] = [0; NETCODE_USER_DATA_BYTES];
+                let mut copy_ud = [0; NETCODE_USER_DATA_BYTES];
                 copy_ud[..u.len()].copy_from_slice(u);
                 copy_ud
             }
-            None => generate_user_data(),
+            None => [0; NETCODE_USER_DATA_BYTES],
         };
 
         let client_to_server_key = crypto::generate_key();
@@ -391,18 +375,18 @@ impl PrivateData {
         encoded: &[u8; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES],
         protocol_id: u64,
         expire_utc: u64,
-        sequence: u64,
+        nonce: &[u8; NETCODE_CONNECT_TOKEN_NONCE_BYTES],
         private_key: &[u8; NETCODE_KEY_BYTES],
     ) -> Result<Self, DecodeError> {
         let additional_data = generate_additional_data(protocol_id, expire_utc)?;
         let mut decoded =
             [0; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES - crypto::NETCODE_ENCRYPT_EXTA_BYTES];
 
-        crypto::decode(
+        crypto::decode_bignonce(
             &mut decoded,
             encoded,
             Some(&additional_data),
-            sequence,
+            nonce,
             private_key,
         )?;
 
@@ -414,7 +398,7 @@ impl PrivateData {
         out: &mut [u8; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES],
         protocol_id: u64,
         expire_utc: u64,
-        sequence: u64,
+        nonce: &[u8; NETCODE_CONNECT_TOKEN_NONCE_BYTES],
         private_key: &[u8; NETCODE_KEY_BYTES],
     ) -> Result<(), GenerateError> {
         let additional_data = generate_additional_data(protocol_id, expire_utc)?;
@@ -423,11 +407,11 @@ impl PrivateData {
 
         self.write(&mut io::Cursor::new(&mut scratch[..]))?;
 
-        crypto::encode(
+        crypto::encode_bignonce(
             &mut out[..],
             &scratch,
             Some(&additional_data),
-            sequence,
+            nonce,
             private_key,
         )?;
 
@@ -617,15 +601,13 @@ fn read_write() {
     crypto::random_bytes(&mut user_data);
 
     let expire = 30;
-    let sequence = 1;
-    let protocol = 0x112233445566;
-    let client_id = 0x665544332211;
+    let protocol = 0x1122_3344_5566;
+    let client_id = 0x6655_4433_2211;
 
     let token = ConnectToken::generate_with_string(
         ["127.0.0.1:8080"].iter().cloned(),
         &private_key,
         expire,
-        sequence,
         protocol,
         client_id,
         Some(&user_data),
@@ -647,7 +629,7 @@ fn read_write() {
     }
     assert_eq!(read.expire_utc, token.expire_utc);
     assert_eq!(read.create_utc, token.create_utc);
-    assert_eq!(read.sequence, token.sequence);
+    assert_eq!(read.nonce, token.nonce);
     assert_eq!(read.protocol, token.protocol);
     assert_eq!(read.timeout_sec, NETCODE_TIMEOUT_SECONDS);
 }
@@ -661,15 +643,13 @@ fn decode() {
     crypto::random_bytes(&mut user_data);
 
     let expire = 30;
-    let sequence = 1;
-    let protocol = 0x112233445566;
-    let client_id = 0x665544332211;
+    let protocol = 0x1122_3344_5566;
+    let client_id = 0x6655_4433_2211;
 
     let mut token = ConnectToken::generate_with_string(
         ["127.0.0.1:8080"].iter().cloned(),
         &private_key,
         expire,
-        sequence,
         protocol,
         client_id,
         Some(&user_data),
@@ -683,8 +663,8 @@ fn decode() {
     assert_eq!(decoded.client_to_server_key, token.client_to_server_key);
     assert_eq!(decoded.server_to_client_key, token.server_to_client_key);
 
-    for i in 0..user_data.len() {
-        assert_eq!(decoded.user_data[i], user_data[i]);
+    for (x, y) in user_data.iter().zip(decoded.user_data.iter()) {
+        assert_eq!(y, x);
     }
 }
 
@@ -793,10 +773,10 @@ fn interop_read() {
 
 #[test]
 fn interop_write() {
+    use crate::capi;
+
     #[allow(unused_variables)]
     let lock = crate::common::test::FFI_LOCK.lock().unwrap();
-
-    use crate::capi;
 
     let mut private_key = [0; NETCODE_KEY_BYTES];
     crypto::random_bytes(&mut private_key);
@@ -805,15 +785,13 @@ fn interop_write() {
     crypto::random_bytes(&mut user_data);
 
     let expire = 30;
-    let sequence = 1;
-    let protocol = 0x112233445566;
-    let client_id = 0x665544332211;
+    let protocol = 0x1122_3344_5566;
+    let client_id = 0x6655_4433_2211;
 
     let token = ConnectToken::generate_with_string(
         ["127.0.0.1:8080"].iter().cloned(),
         &private_key,
         expire,
-        sequence,
         protocol,
         client_id,
         Some(&user_data),
@@ -834,7 +812,7 @@ fn interop_write() {
     assert_eq!(c_token_read_result, 1); // returns 1 on successful read
     let output = unsafe { output.assume_init() };
 
-    //assert_eq!(output.nonce, token.sequence);
+        assert_eq!(output.nonce, token.nonce);
     assert_eq!(output.create_timestamp, token.create_utc);
     assert_eq!(output.expire_timestamp, token.expire_utc);
     assert_eq!(

@@ -203,7 +203,6 @@ where
             [addr].iter().cloned(),
             &self.internal.connect_key,
             expire_secs,
-            self.internal.token_sequence,
             self.internal.protocol_id,
             client_id,
             user_data,
@@ -548,7 +547,7 @@ where
             &req.private_data,
             self.protocol_id,
             req.token_expire,
-            req.sequence,
+            &req.nonce,
             &self.connect_key,
         ) {
             let has_host = v.hosts.get().any(|thost| {
@@ -739,7 +738,6 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::common::*;
     use crate::packet::*;
     use crate::token;
 
@@ -750,7 +748,7 @@ mod test {
 
     const PROTOCOL_ID: u64 = 0xFFCC;
     const MAX_CLIENTS: usize = 256;
-    const CLIENT_ID: u64 = 0xFFEEDD;
+    const CLIENT_ID: u64 = 0xFF_EEDD;
 
     struct TestHarness<I, S>
     where
@@ -800,7 +798,6 @@ mod test {
                 [Self::str_to_addr(addr)].iter().cloned(),
                 private_key,
                 30, //Expire
-                0,
                 PROTOCOL_ID,
                 CLIENT_ID, //Client Id
                 None,
@@ -836,7 +833,7 @@ mod test {
                 version: NETCODE_VERSION_STRING.clone(),
                 protocol_id: PROTOCOL_ID,
                 token_expire: self.connect_token.expire_utc,
-                sequence: self.connect_token.sequence,
+                nonce: self.connect_token.nonce,
                 private_data,
             });
 
